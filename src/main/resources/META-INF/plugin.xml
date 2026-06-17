@@ -49,6 +49,9 @@ DualVulnDroid - Android vulnerability detector plugin.
         <externalAnnotator
                 language="kotlin"
                 implementationClass="com.dualvulndroid.dualvulndroid.CodeSentinelAnnotator"/>
+        <externalAnnotator
+                language="JAVA"
+                implementationClass="com.dualvulndroid.dualvulndroid.CodeSentinelAnnotator"/>
     </extensions>
     <extensions defaultExtensionNs="org.jetbrains.kotlin">
         <supportsKotlinPluginMode supportsK2="true" />
