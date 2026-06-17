@@ -4,46 +4,42 @@ import com.intellij.codeInspection.LocalInspectionTool
 import com.intellij.codeInspection.ProblemsHolder
 import com.intellij.codeInspection.ProblemHighlightType
 import com.intellij.psi.PsiElementVisitor
-import com.intellij.psi.PsiFile
+import org.jetbrains.kotlin.psi.KtFile // අලුතින් දාන්න
+import org.jetbrains.kotlin.psi.KtVisitorVoid // අලුතින් දාන්න
 
-class CodeSentinelInspection :  LocalInspectionTool() {
+class CodeSentinelInspection : LocalInspectionTool() {
 
-    init {
-        println("CodeSentinel Inspection Loaded")
-    }
-    override fun getShortName(): String {
-        return "CodeSentinel"
-    }
-
-    override fun getDisplayName(): String {
-        return "CodeSentinel Security Scanner"
-    }
-
-    override fun getGroupDisplayName(): String {
-        return "Security"
-    }
+    override fun getShortName() = "CodeSentinel"
+    override fun getDisplayName() = "CodeSentinel Security Scanner"
+    override fun getGroupDisplayName() = "Security"
 
     override fun buildVisitor(
         holder: ProblemsHolder,
         isOnTheFly: Boolean
     ): PsiElementVisitor {
 
-        return object : PsiElementVisitor() {
+        // KtVisitorVoid පාවිච්චි කරලා PsiElementVisitor එකක් විදිහට return කරනවා
+        return object : KtVisitorVoid() {
 
-            override fun visitFile(file: PsiFile) {
+            // visitFile වෙනුවට Kotlin files සඳහා visitKtFile පාවිච්චි කරනවා
+            override fun visitKtFile(file: KtFile) {
+                super.visitKtFile(file)
 
+                println("VISITING FILE = ${file.name}")
                 val code = file.text
 
                 try {
+                    val response = APIClient().scanCode(code)
+                    println("API RESPONSE = $response")
 
-                    val response =
-                        APIClient().scanCode(code)
+                    val vulnerable = response?.contains(
+                        Regex("\"vulnerable\"\\s*:\\s*true")
+                    ) == true
 
-                    if (
-                        response != null &&
-                        response.contains("\"vulnerable\":true")
-                    ) {
+                    println("VULNERABLE = $vulnerable")
 
+                    if (vulnerable) {
+                        println("REGISTERING PROBLEM")
                         holder.registerProblem(
                             file,
                             "Vulnerability detected by CodeSentinel",
@@ -52,10 +48,7 @@ class CodeSentinelInspection :  LocalInspectionTool() {
                     }
 
                 } catch (e: Exception) {
-
-                    println(
-                        "CodeSentinel Error: ${e.message}"
-                    )
+                    e.printStackTrace()
                 }
             }
         }

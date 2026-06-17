@@ -20,7 +20,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     intellijPlatform {
-        intellijIdea("2025.2.4")
+        intellijIdeaCommunity("2025.1")
         testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
         bundledPlugin("org.jetbrains.kotlin")
 
@@ -35,7 +35,7 @@ dependencies {
 intellijPlatform {
     pluginConfiguration {
         ideaVersion {
-            sinceBuild = "252.25557"
+            sinceBuild = "251"
 
         }
 
