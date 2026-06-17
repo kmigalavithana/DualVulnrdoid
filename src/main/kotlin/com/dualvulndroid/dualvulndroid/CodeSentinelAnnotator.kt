@@ -5,97 +5,136 @@ import com.intellij.lang.annotation.AnnotationHolder
 import com.intellij.lang.annotation.ExternalAnnotator
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.project.ProjectManager
 import com.intellij.psi.PsiFile
 import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.kotlin.psi.KtFile
 import org.jetbrains.kotlin.psi.KtNamedFunction
+import com.intellij.psi.PsiMethod // Java methods සඳහා
 import java.util.concurrent.ConcurrentHashMap
+import java.util.regex.Pattern
 
-class CodeSentinelAnnotator : ExternalAnnotator<String, Boolean>() {
+// Backend එකෙන් එන දත්ත මතක තියාගන්න හදන Class එකක්
+data class ScanResult(
+    val isVulnerable: Boolean,
+    val type: String,
+    val explanation: String,
+    val confidence: Int
+)
 
-    companion object {
-        // API responses සහ දැනට සිදුවන scans track කිරීමට map දෙකක්
-        private val scanResults = ConcurrentHashMap<String, Boolean>()
-        private val pendingScans = ConcurrentHashMap<String, Boolean>()
-    }
+// 🚀 FIX 2: Memory leak warning එක නැති කරන්න Cache එක Class එකෙන් පිටත Top-Level එකක් කලා
+private val scanResults = ConcurrentHashMap<String, ScanResult>()
+private val pendingScans = ConcurrentHashMap<String, Boolean>()
+
+class CodeSentinelAnnotator : ExternalAnnotator<String, ScanResult>() {
 
     override fun collectInformation(file: PsiFile): String? {
-        if (file is KtFile) {
+        // 🔄 FIX: Kotlin (.kt) සහ Java (.java) ෆයිල් දෙකම ලස්සනට හඳුනාගන්නවා
+        if (file is KtFile || file.language.id == "JAVA") {
             return file.text
         }
         return null
     }
 
-    override fun doAnnotate(collectedInfo: String?): Boolean? {
-        if (collectedInfo == null) return false
+    override fun doAnnotate(collectedInfo: String?): ScanResult? {
+        if (collectedInfo == null) return null
 
-        // කලින්ම scan කරලා ප්‍රතිඵල තියෙනවා නම් කෙලින්ම ඒක දෙනවා
         if (scanResults.containsKey(collectedInfo)) {
             return scanResults[collectedInfo]
         }
 
-        // දැනටමත් මේ කෝඩ් එක scan වෙමින් පවතිනවා නම් ආයෙත් API call කරන්නේ නැහැ
         if (pendingScans.putIfAbsent(collectedInfo, true) == null) {
-
-            // 🌐 වෙනමම background pooled thread එකක API call එක දානවා (IDE එක freeze වෙන්නේ නැහැ)
             ApplicationManager.getApplication().executeOnPooledThread {
                 try {
-                    println("ExternalAnnotator: Fetching real API Response asynchronously...")
+                    println("ExternalAnnotator: Fetching full security metrics...")
+                    val response = APIClient().scanCode(collectedInfo) ?: ""
 
-                    // ඔයාගේ වෙනමම තියෙන APIClient class එක මෙතනින් call වෙනවා
-                    val response = APIClient().scanCode(collectedInfo)
+                    val isVulnerable = response.contains("\"vulnerable\":true")
+                    val type = extractJsonValue(response, "vulnerabilityType") ?: "Security Flaw"
+                    val explanation = extractJsonValue(response, "explanation") ?: "Potential vulnerability detected."
+                    val confidence = extractJsonInt(response, "confidence")
 
-                    val isVulnerable = response?.contains(Regex("\"vulnerable\"\\s*:\\s*true")) == true
-
-                    // ප්‍රතිඵලය cache එකට දානවා
-                    scanResults[collectedInfo] = isVulnerable
+                    val result = ScanResult(isVulnerable, type, explanation, confidence)
+                    scanResults[collectedInfo] = result
                     pendingScans.remove(collectedInfo)
 
-                    println("ExternalAnnotator: API Scan Done! Vulnerable = $isVulnerable. Restarting Daemon for UI Highlight...")
-
-                    // 🎨 UI එකට Highlight එක push කරන්න IntelliJ Daemon එක restart කරනවා
                     ApplicationManager.getApplication().invokeLater {
                         ApplicationManager.getApplication().runWriteAction {
                             ProjectManagerHelper.restartDaemon()
                         }
                     }
-
                 } catch (e: Exception) {
                     e.printStackTrace()
                     pendingScans.remove(collectedInfo)
                 }
             }
         }
-
-        // මුල්ම පාර API එකෙන් response එක එනකම් දැනට false දීලා UI එක block නොවී තියාගන්නවා
-        return false
+        return null
     }
 
-    override fun apply(file: PsiFile, isVulnerable: Boolean?, holder: AnnotationHolder) {
+    override fun apply(file: PsiFile, result: ScanResult?, holder: AnnotationHolder) {
         val currentText = file.text
-        val actualVulnerability = scanResults[currentText] ?: false
+        val actualResult = scanResults[currentText] ?: return
 
-        if (file is KtFile && actualVulnerability) {
-            println("ExternalAnnotator: UI Applying warning highlight on function...")
+        if (actualResult.isVulnerable) {
 
-            // File එකේ තියෙන හැම function එකක්ම check කරනවා (nested ඒවාත් එක්කම)
-            val functions = PsiTreeUtil.findChildrenOfType(file, KtNamedFunction::class.java)
-            val firstFunction = functions.firstOrNull()
+            // 📝 Tooltip message එක HTML වලින් හදාගන්නවා
+            val tooltipMessage = """
+                <html>
+                <b>[CodeSentinel] ${actualResult.type} Detected</b><br/>
+                <font color='red'>Confidence Score: ${actualResult.confidence}%</font><br/><br/>
+                <i>Explanation:</i> ${actualResult.explanation}
+                </html>
+            """.trimIndent()
 
-            if (firstFunction != null) {
-                val target = firstFunction.nameIdentifier ?: firstFunction
-                holder.newAnnotation(HighlightSeverity.WARNING, "Vulnerability detected by CodeSentinel")
-                    .range(target.textRange)
-                    .create()
+            // 1. ජාවා ෆයිල් එකක් නම් highlight කරන ක්‍රමය
+            if (file.language.id == "JAVA") {
+                val methods = PsiTreeUtil.findChildrenOfType(file, PsiMethod::class.java)
+                val firstMethod = methods.firstOrNull()
+                if (firstMethod != null) {
+                    val target = firstMethod.nameIdentifier ?: firstMethod
+                    holder.newAnnotation(HighlightSeverity.ERROR, "${actualResult.type} (${actualResult.confidence}%)")
+                        .range(target.textRange)
+                        .tooltip(tooltipMessage)
+                        .create()
+                }
+            }
+            // 2. කොට්ලින් ෆයිල් එකක් නම් highlight කරන ක්‍රමය
+            else if (file is KtFile) {
+                val functions = PsiTreeUtil.findChildrenOfType(file, KtNamedFunction::class.java)
+                val firstFunction = functions.firstOrNull()
+                if (firstFunction != null) {
+                    val target = firstFunction.nameIdentifier ?: firstFunction
+                    val annotation = holder.newAnnotation(HighlightSeverity.ERROR, "${actualResult.type} (${actualResult.confidence}%)")
+                        .range(target.textRange)
+                        .tooltip(tooltipMessage)
+
+                    if (actualResult.type.contains("SQL", ignoreCase = true)) {
+                        annotation.withFix(SQLQuickFix(firstFunction))
+                    }
+                    annotation.create()
+                }
             }
         }
     }
+
+    private fun extractJsonValue(json: String, key: String): String? {
+        val pattern = Pattern.compile("\"$key\"\\s*:\\s*\"([^\"]+)\"")
+        val matcher = pattern.matcher(json)
+        return if (matcher.find()) matcher.group(1) else null
+    }
+
+    private fun extractJsonInt(json: String, key: String): Int {
+        val pattern = Pattern.compile("\"$key\"\\s*:\\s*(\\d+)")
+        val matcher = pattern.matcher(json)
+        return if (matcher.find()) matcher.group(1).toInt() else 0
+    }
 }
 
-// 🛠️ Daemon එක restart කරන්න වෙනමම තියෙන එකම Helper Object එක
+// 🚀 FIX 1: හැලීලා තිබ්බ ProjectManagerHelper Object එක ආපහු එකතු කලා
 object ProjectManagerHelper {
     fun restartDaemon() {
-        val projects = com.intellij.openapi.project.ProjectManager.getInstance().openProjects
+        val projects = ProjectManager.getInstance().openProjects
         for (project in projects) {
             DaemonCodeAnalyzer.getInstance(project).restart()
         }
