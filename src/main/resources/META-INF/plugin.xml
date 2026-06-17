@@ -22,22 +22,33 @@ DualVulnDroid - Android vulnerability detector plugin.
     <resource-bundle>messages.MyMessageBundle</resource-bundle>
     <!-- Extensions defined by the plugin.
          Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
+<!--    <extensions defaultExtensionNs="com.intellij">-->
+
+
+<!--        <toolWindow-->
+<!--                id="MyToolWindow"-->
+<!--                factoryClass="com.dualvulndroid.dualvulndroid.MyToolWindowFactory"-->
+<!--                icon="AllIcons.Toolwindows.ToolWindowPalette"/>-->
+
+<!--        <localInspection-->
+<!--                language="kotlin"-->
+<!--                shortName="CodeSentinel"-->
+<!--                displayName="CodeSentinel Security Scanner"-->
+<!--                groupName="Security"-->
+<!--                enabledByDefault="true"-->
+<!--                implementationClass="com.dualvulndroid.dualvulndroid.CodeSentinelInspection"/>-->
+
+<!--    </extensions>-->
     <extensions defaultExtensionNs="com.intellij">
-
-
         <toolWindow
                 id="MyToolWindow"
                 factoryClass="com.dualvulndroid.dualvulndroid.MyToolWindowFactory"
                 icon="AllIcons.Toolwindows.ToolWindowPalette"/>
 
-        <localInspection
+        <!-- පරණ localInspection එක වෙනුවට මේක දාන්න -->
+        <externalAnnotator
                 language="kotlin"
-                shortName="CodeSentinel"
-                displayName="CodeSentinel Security Scanner"
-                groupName="Security"
-                enabledByDefault="true"
-                implementationClass="com.dualvulndroid.dualvulndroid.CodeSentinelInspection"/>
-
+                implementationClass="com.dualvulndroid.dualvulndroid.CodeSentinelAnnotator"/>
     </extensions>
     <extensions defaultExtensionNs="org.jetbrains.kotlin">
         <supportsKotlinPluginMode supportsK2="true" />

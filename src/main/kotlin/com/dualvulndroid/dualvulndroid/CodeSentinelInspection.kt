@@ -3,9 +3,11 @@ package com.dualvulndroid.dualvulndroid
 import com.intellij.codeInspection.LocalInspectionTool
 import com.intellij.codeInspection.ProblemsHolder
 import com.intellij.codeInspection.ProblemHighlightType
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.psi.PsiElementVisitor
-import org.jetbrains.kotlin.psi.KtFile // අලුතින් දාන්න
-import org.jetbrains.kotlin.psi.KtVisitorVoid // අලුතින් දාන්න
+import org.jetbrains.kotlin.psi.KtFile
+import org.jetbrains.kotlin.psi.KtVisitorVoid
+import org.jetbrains.kotlin.psi.KtNamedFunction
 
 class CodeSentinelInspection : LocalInspectionTool() {
 
@@ -17,38 +19,50 @@ class CodeSentinelInspection : LocalInspectionTool() {
         holder: ProblemsHolder,
         isOnTheFly: Boolean
     ): PsiElementVisitor {
+        return object : PsiElementVisitor() {
+            override fun visitElement(element: com.intellij.psi.PsiElement) {
+                super.visitElement(element)
+                if (element is KtFile) {
+                    element.accept(kotlinVisitor(holder))
+                }
+            }
+        }
+    }
 
-        // KtVisitorVoid පාවිච්චි කරලා PsiElementVisitor එකක් විදිහට return කරනවා
+    private fun kotlinVisitor(holder: ProblemsHolder): KtVisitorVoid {
         return object : KtVisitorVoid() {
+            override fun visitNamedFunction(function: KtNamedFunction) {
+                super.visitNamedFunction(function)
 
-            // visitFile වෙනුවට Kotlin files සඳහා visitKtFile පාවිච්චි කරනවා
-            override fun visitKtFile(file: KtFile) {
-                super.visitKtFile(file)
-
-                println("VISITING FILE = ${file.name}")
+                val file = function.containingKtFile
                 val code = file.text
 
-                try {
-                    val response = APIClient().scanCode(code)
-                    println("API RESPONSE = $response")
+                // 🚀 FIX: Network call එක UI thread එකෙන් ඉවත් කරලා Pooled (Background) Thread එකකට දානවා
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    try {
+                        println("Background Scan Started for function: ${function.name}")
+                        val response = APIClient().scanCode(code)
+                        println("API RESPONSE = $response")
 
-                    val vulnerable = response?.contains(
-                        Regex("\"vulnerable\"\\s*:\\s*true")
-                    ) == true
+                        val vulnerable = response?.contains(
+                            Regex("\"vulnerable\"\\s*:\\s*true")
+                        ) == true
 
-                    println("VULNERABLE = $vulnerable")
+                        if (vulnerable) {
+                            println("VULNERABILITY FOUND! Requesting UI Update...")
 
-                    if (vulnerable) {
-                        println("REGISTERING PROBLEM")
-                        holder.registerProblem(
-                            file,
-                            "Vulnerability detected by CodeSentinel",
-                            ProblemHighlightType.WARNING
-                        )
+                            // 🎨 FIX: Highlight එක ඇඳීම (UI update එක) ආපහු Read Action එකක් ඇතුළේ කරන්න ඕනේ
+                            ApplicationManager.getApplication().runReadAction {
+                                holder.registerProblem(
+                                    function.nameIdentifier ?: function,
+                                    "Vulnerability detected by CodeSentinel inside this function",
+                                    ProblemHighlightType.WARNING
+                                )
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
-
-                } catch (e: Exception) {
-                    e.printStackTrace()
                 }
             }
         }
