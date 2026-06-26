@@ -45,6 +45,14 @@ DualVulnDroid - Android vulnerability detector plugin.
                 factoryClass="com.dualvulndroid.dualvulndroid.MyToolWindowFactory"
                 icon="AllIcons.Toolwindows.ToolWindowPalette"/>
 
+        <localInspection
+                language="UAST"
+                shortName="CodeSentinelInspection"
+                implementationClass="com.dualvulndroid.dualvulndroid.CodeSentinelInspection"
+                displayName="CodeSentinel Security Scanner"
+                groupName="Security"
+                enabledByDefault="true"
+                level="WARNING"/>
         <!-- පරණ localInspection එක වෙනුවට මේක දාන්න -->
         <externalAnnotator
                 language="kotlin"

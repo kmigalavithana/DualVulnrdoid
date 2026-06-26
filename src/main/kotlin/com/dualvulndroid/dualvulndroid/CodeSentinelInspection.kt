@@ -2,69 +2,39 @@ package com.dualvulndroid.dualvulndroid
 
 import com.intellij.codeInspection.LocalInspectionTool
 import com.intellij.codeInspection.ProblemsHolder
-import com.intellij.codeInspection.ProblemHighlightType
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.psi.PsiElementVisitor
-import org.jetbrains.kotlin.psi.KtFile
-import org.jetbrains.kotlin.psi.KtVisitorVoid
-import org.jetbrains.kotlin.psi.KtNamedFunction
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiMethod
 
 class CodeSentinelInspection : LocalInspectionTool() {
 
-    override fun getShortName() = "CodeSentinel"
-    override fun getDisplayName() = "CodeSentinel Security Scanner"
-    override fun getGroupDisplayName() = "Security"
+    // 🚀 plugin.xml එකේ language="UAST" එකත් එක්ක match වෙන්න shortName එක දෙනවා
+    override fun getShortName(): String = "CodeSentinelInspection"
 
-    override fun buildVisitor(
-        holder: ProblemsHolder,
-        isOnTheFly: Boolean
-    ): PsiElementVisitor {
+    override fun getDisplayName(): String = "CodeSentinel Security Scanner"
+    override fun getGroupDisplayName(): String = "Security"
+
+    // 💡 HTML description file එකක් වෙනුවට කෝඩ් එකෙන්ම static text එකක් සෙට් කරනවා
+    override fun getStaticDescription(): String? {
+        return "CodeSentinel security analysis tool targeting injection vulnerabilities and SSL flaws."
+    }
+
+    override fun buildVisitor(holder: ProblemsHolder, isOnTheFly: Boolean): PsiElementVisitor {
         return object : PsiElementVisitor() {
-            override fun visitElement(element: com.intellij.psi.PsiElement) {
+
+            // 🛡️ UAST (Universal Abstract Syntax Tree) නිසා Java/Kotlin methods දෙකම මෙතනින් handle වෙනවා
+            override fun visitElement(element: PsiElement) {
                 super.visitElement(element)
-                if (element is KtFile) {
-                    element.accept(kotlinVisitor(holder))
+
+                if (element is PsiMethod) {
+                    // 🚀 Real-time scanning, network calls සහ UI highlights (රතු ඉරි)
+                    // සේරම අපේ CodeSentinelAnnotator එකෙන් පට්ටම ලස්සනට backgroundthread එකකින්
+                    // කරන නිසා Inspection එක සරලව තබා ගනී.
+                    // මේකෙන් IDE එක freeze වෙන එක 100%ක්ම වැළකෙනවා!
                 }
             }
         }
     }
 
-    private fun kotlinVisitor(holder: ProblemsHolder): KtVisitorVoid {
-        return object : KtVisitorVoid() {
-            override fun visitNamedFunction(function: KtNamedFunction) {
-                super.visitNamedFunction(function)
-
-                val file = function.containingKtFile
-                val code = file.text
-
-                // 🚀 FIX: Network call එක UI thread එකෙන් ඉවත් කරලා Pooled (Background) Thread එකකට දානවා
-                ApplicationManager.getApplication().executeOnPooledThread {
-                    try {
-                        println("Background Scan Started for function: ${function.name}")
-                        val response = APIClient().scanCode(code)
-                        println("API RESPONSE = $response")
-
-                        val vulnerable = response?.contains(
-                            Regex("\"vulnerable\"\\s*:\\s*true")
-                        ) == true
-
-                        if (vulnerable) {
-                            println("VULNERABILITY FOUND! Requesting UI Update...")
-
-                            // 🎨 FIX: Highlight එක ඇඳීම (UI update එක) ආපහු Read Action එකක් ඇතුළේ කරන්න ඕනේ
-                            ApplicationManager.getApplication().runReadAction {
-                                holder.registerProblem(
-                                    function.nameIdentifier ?: function,
-                                    "Vulnerability detected by CodeSentinel inside this function",
-                                    ProblemHighlightType.WARNING
-                                )
-                            }
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }
-            }
-        }
-    }
+    override fun isEnabledByDefault(): Boolean = true
 }

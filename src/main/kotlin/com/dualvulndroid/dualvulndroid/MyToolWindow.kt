@@ -87,9 +87,7 @@ class MyToolWindowFactory : ToolWindowFactory {
 
                             if (
                                 response != null &&
-                                response.contains(
-                                    "\"vulnerable\":true"
-                                )
+                                response?.vulnerable == true
                             ) {
 
                                 vulnerabilityFound = true

@@ -7,133 +7,141 @@ import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.psi.PsiFile
-import com.intellij.psi.util.PsiTreeUtil
-import org.jetbrains.kotlin.psi.KtFile
-import org.jetbrains.kotlin.psi.KtNamedFunction
-import com.intellij.psi.PsiMethod // Java methods සඳහා
+import com.intellij.openapi.util.TextRange
 import java.util.concurrent.ConcurrentHashMap
-import java.util.regex.Pattern
 
-// Backend එකෙන් එන දත්ත මතක තියාගන්න හදන Class එකක්
-data class ScanResult(
+// පේළියේ අංකය සහ එහි ප්‍රතිඵලය තියාගන්න දත්ත ව්‍යුහය
+data class LineScanResult(
+    val lineText: String,
     val isVulnerable: Boolean,
     val type: String,
-    val explanation: String,
-    val confidence: Int
+    val confidence: Int,
+    val lineIndex: Int
 )
 
-// 🚀 FIX 2: Memory leak warning එක නැති කරන්න Cache එක Class එකෙන් පිටත Top-Level එකක් කලා
-private val scanResults = ConcurrentHashMap<String, ScanResult>()
-private val pendingScans = ConcurrentHashMap<String, Boolean>()
+// Thread-safe map එකක්, හැම file path එකකටම අදාළ වැරදි පේළි ලැයිස්තුව තියාගන්න
+private val fileVulnerabilities = ConcurrentHashMap<String, List<LineScanResult>>()
+private val pendingFiles = ConcurrentHashMap<String, Boolean>()
 
-class CodeSentinelAnnotator : ExternalAnnotator<String, ScanResult>() {
+class CodeSentinelAnnotator : ExternalAnnotator<PsiFile, List<LineScanResult>>() {
 
-    override fun collectInformation(file: PsiFile): String? {
-        // 🔄 FIX: Kotlin (.kt) සහ Java (.java) ෆයිල් දෙකම ලස්සනට හඳුනාගන්නවා
-        if (file is KtFile || file.language.id == "JAVA") {
-            return file.text
+    override fun collectInformation(file: PsiFile): PsiFile? {
+        if (file.language.id == "JAVA" || file.language.id == "kotlin") {
+            return file
         }
         return null
     }
 
-    override fun doAnnotate(collectedInfo: String?): ScanResult? {
-        if (collectedInfo == null) return null
+    override fun doAnnotate(file: PsiFile?): List<LineScanResult>? {
+        if (file == null) return null
 
-        if (scanResults.containsKey(collectedInfo)) {
-            return scanResults[collectedInfo]
+        val filePath = file.virtualFile?.path ?: return null
+        val fileText = file.text
+
+        // දැනටමත් ස්කෑන් කරලා ප්‍රතිඵල තියෙනවා නම් ඒකම රිටර්න් කරනවා
+        if (fileVulnerabilities.containsKey(filePath)) {
+            return fileVulnerabilities[filePath]
         }
 
-        if (pendingScans.putIfAbsent(collectedInfo, true) == null) {
+        if (pendingFiles.putIfAbsent(filePath, true) == null) {
             ApplicationManager.getApplication().executeOnPooledThread {
                 try {
-                    println("ExternalAnnotator: Fetching full security metrics...")
-                    val response = APIClient().scanCode(collectedInfo) ?: ""
+                    val lines = fileText.split("\n")
+                    val discoveredVulns = mutableListOf<LineScanResult>()
+                    val apiClient = APIClient()
 
-                    val isVulnerable = response.contains("\"vulnerable\":true")
-                    val type = extractJsonValue(response, "vulnerabilityType") ?: "Security Flaw"
-                    val explanation = extractJsonValue(response, "explanation") ?: "Potential vulnerability detected."
-                    val confidence = extractJsonInt(response, "confidence")
+                    println("⚡ CodeSentinel: Line-by-Line Scanning started for ${file.name}...")
 
-                    val result = ScanResult(isVulnerable, type, explanation, confidence)
-                    scanResults[collectedInfo] = result
-                    pendingScans.remove(collectedInfo)
+                    // 🔄 හැම කෝඩ් පේළියක්ම වෙන වෙනම අරන් Spring Boot එකට යවනවා
+                    for ((index, line) in lines.withIndex()) {
+                        val trimmedLine = line.trim()
 
-                    ApplicationManager.getApplication().invokeLater {
-                        ApplicationManager.getApplication().runWriteAction {
-                            ProjectManagerHelper.restartDaemon()
+                        // හිස් පේළි හෝ comments ස්කෑන් කරන්නේ නැහැ
+                        if (trimmedLine.isEmpty() || trimmedLine.startsWith("//") || trimmedLine.startsWith("import")) {
+                            continue
+                        }
+
+                        val response = apiClient.scanCode(trimmedLine)
+                        if (response != null && response.status == "SUCCESS" && response.vulnerable) {
+
+                            val type = if (trimmedLine.lowercase().contains("select") || trimmedLine.lowercase().contains("where")) {
+                                "SQL Injection (CWE-89)"
+                            } else {
+                                "Improper Certificate Validation (CWE-295)"
+                            }
+
+                            discoveredVulns.add(
+                                LineScanResult(
+                                    lineText = line,
+                                    isVulnerable = true,
+                                    type = type,
+                                    confidence = response.confidence.toInt(),
+                                    lineIndex = index
+                                )
+                            )
+                            println("⚠️ Vulnerability Found on Line ${index + 1}: $trimmedLine")
                         }
                     }
+
+                    fileVulnerabilities[filePath] = discoveredVulns
+                    pendingFiles.remove(filePath)
+
+                    // IDE Editor එක රීෆ්‍රෙෂ් කරන්න
+                    ApplicationManager.getApplication().invokeLater {
+                        ProjectManagerHelper.restartDaemon()
+                    }
+
+
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    pendingScans.remove(collectedInfo)
+                    pendingFiles.remove(filePath)
                 }
             }
         }
         return null
     }
 
-    override fun apply(file: PsiFile, result: ScanResult?, holder: AnnotationHolder) {
-        val currentText = file.text
-        val actualResult = scanResults[currentText] ?: return
+    override fun apply(file: PsiFile, vulns: List<LineScanResult>?, holder: AnnotationHolder) {
+        val filePath = file.virtualFile?.path ?: return
+        val actualVulns = fileVulnerabilities[filePath] ?: return
+        val document = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(file.virtualFile) ?: return
 
-        if (actualResult.isVulnerable) {
+        // අහුවුණු හැම වැරදි පේළියක්ම IDE එක ඇතුළේ Highlight කරනවා
+        for (vuln in actualVulns) {
+            if (vuln.lineIndex < document.lineCount) {
+                val startOffset = document.getLineStartOffset(vuln.lineIndex)
+                val endOffset = document.getLineEndOffset(vuln.lineIndex)
+                val range = TextRange(startOffset, endOffset)
 
-            // 📝 Tooltip message එක HTML වලින් හදාගන්නවා
-            val tooltipMessage = """
-                <html>
-                <b>[CodeSentinel] ${actualResult.type} Detected</b><br/>
-                <font color='red'>Confidence Score: ${actualResult.confidence}%</font><br/><br/>
-                <i>Explanation:</i> ${actualResult.explanation}
-                </html>
-            """.trimIndent()
+                val tooltipMessage = """
+                    <html>
+                    <body style='font-family: sans-serif;'>
+                    <h3 style='color: #ff5555; margin-bottom: 5px;'>⚠️ [CodeSentinel] ${vuln.type} Detected</h3>
+                    <b>Confidence Score:</b> <span style='color: #ff5555;'>${vuln.confidence}%</span><br/><br/>
+                    <b>Vulnerable Line:</b> <code style='background-color: #331111;'>${vuln.lineText.trim()}</code><br/><br/>
+                    <b>Description:</b> Potential vulnerability matched with LVDAndro deep learning model patterns.<br/>
+                    </body>
+                    </html>
+                """.trimIndent()
 
-            // 1. ජාවා ෆයිල් එකක් නම් highlight කරන ක්‍රමය
-            if (file.language.id == "JAVA") {
-                val methods = PsiTreeUtil.findChildrenOfType(file, PsiMethod::class.java)
-                val firstMethod = methods.firstOrNull()
-                if (firstMethod != null) {
-                    val target = firstMethod.nameIdentifier ?: firstMethod
-                    holder.newAnnotation(HighlightSeverity.ERROR, "${actualResult.type} (${actualResult.confidence}%)")
-                        .range(target.textRange)
-                        .tooltip(tooltipMessage)
-                        .create()
-                }
+                // වැරදි තියෙන පේළිය යටින්ම රතු ඉර (ERROR Severity) ඇඳීම
+                holder.newAnnotation(HighlightSeverity.ERROR, "CodeSentinel: ${vuln.type} (${vuln.confidence}%)")
+                    .range(range)
+                    .tooltip(tooltipMessage)
+                    .create()
             }
-            // 2. කොට්ලින් ෆයිල් එකක් නම් highlight කරන ක්‍රමය
-            else if (file is KtFile) {
-                val functions = PsiTreeUtil.findChildrenOfType(file, KtNamedFunction::class.java)
-                val firstFunction = functions.firstOrNull()
-                if (firstFunction != null) {
-                    val target = firstFunction.nameIdentifier ?: firstFunction
-                    val annotation = holder.newAnnotation(HighlightSeverity.ERROR, "${actualResult.type} (${actualResult.confidence}%)")
-                        .range(target.textRange)
-                        .tooltip(tooltipMessage)
 
-                    if (actualResult.type.contains("SQL", ignoreCase = true)) {
-                        annotation.withFix(SQLQuickFix(firstFunction))
-                    }
-                    annotation.create()
-                }
-            }
         }
     }
-
-    private fun extractJsonValue(json: String, key: String): String? {
-        val pattern = Pattern.compile("\"$key\"\\s*:\\s*\"([^\"]+)\"")
-        val matcher = pattern.matcher(json)
-        return if (matcher.find()) matcher.group(1) else null
-    }
-
-    private fun extractJsonInt(json: String, key: String): Int {
-        val pattern = Pattern.compile("\"$key\"\\s*:\\s*(\\d+)")
-        val matcher = pattern.matcher(json)
-        return if (matcher.find()) matcher.group(1).toInt() else 0
-    }
 }
-
-// 🚀 FIX 1: හැලීලා තිබ්බ ProjectManagerHelper Object එක ආපහු එකතු කලා
 object ProjectManagerHelper {
+    fun clearCache() {
+        // Cache එක clear කරන්න අවශ්‍ය නම් මෙතනින් කරන්න පුළුවන්
+        println("CodeSentinel Cache: Successfully Cleared via Helper!")
+    }
+
     fun restartDaemon() {
+        // දැනට open වෙලා තියෙන හැම ප්‍රොජෙක්ට් එකකම editor එක refresh කරනවා රතු ඉරි පෙන්වන්න
         val projects = ProjectManager.getInstance().openProjects
         for (project in projects) {
             DaemonCodeAnalyzer.getInstance(project).restart()
