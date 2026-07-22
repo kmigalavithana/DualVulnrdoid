@@ -11,7 +11,6 @@ import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiFile
 import java.util.concurrent.ConcurrentHashMap
 
-// 1. collectInformation එකෙන් doAnnotate එකට Data පාස් කරන්න හදන Class එක
 data class FileScanData(
     val path: String,
     val fileText: String,
@@ -25,7 +24,6 @@ data class LineData(
     val endOffset: Int
 )
 
-// 2. ඩිටෙක්ට් වෙන රිසල්ට් එක
 data class LineScanResult(
     val lineText: String,
     val vulnerabilityType: String,
@@ -41,7 +39,6 @@ class CodeSentinelAnnotator : ExternalAnnotator<FileScanData, List<LineScanResul
         private val scanning = ConcurrentHashMap.newKeySet<String>()
     }
 
-    // 🎯 පළවෙනි පියවර: UI/Read Thread එකේදී ආරක්ෂිතව ෆයිල් එකේ Data ටික විතරක් එකතු කරගන්නවා
     override fun collectInformation(file: PsiFile): FileScanData? {
         val lang = file.language.id.lowercase()
         if (lang != "java" && lang != "kotlin") return null
@@ -73,9 +70,8 @@ class CodeSentinelAnnotator : ExternalAnnotator<FileScanData, List<LineScanResul
         return FileScanData(path, fileText, linesData)
     }
 
-    // 🎯 දෙවැනි පියවර: Background Thread එකේදී Read Action බ්ලොක් නැතුව API Call එක විතරක් කරනවා
     override fun doAnnotate(collectedData: FileScanData?): List<LineScanResult>? {
-        println("ANNOTATOR RUNNING BACKGROUND API CALLS")
+        println("[ANNOTATE] Starting scan...")
         if (collectedData == null) return null
 
         val path = collectedData.path
@@ -85,21 +81,39 @@ class CodeSentinelAnnotator : ExternalAnnotator<FileScanData, List<LineScanResul
         val results = mutableListOf<LineScanResult>()
 
         try {
-            for (line in collectedData.lines) {
-                // CodeBERT බැක්එන්ඩ් එකට Call එකක් යනවා
-                val response = api.scanCode(line.text)
+            // Scan entire file at once
+            val response = api.scanCode(collectedData.fileText)
 
-                if (response != null && response.vulnerable) {
+            if (response != null && response.vulnerable) {
+                println("[ANNOTATE] ✓ Vulnerability detected: ${response.vulnerabilityType}")
+
+                // If backend provides specific line detections, use them
+                if (response.detections.isNotEmpty()) {
+                    response.detections.forEach { detection ->
+                        val line = collectedData.lines.find { it.index == detection.line }
+                        if (line != null) {
+                            results.add(
+                                LineScanResult(
+                                    lineText = line.text,
+                                    vulnerabilityType = detection.type,
+                                    confidence = response.confidence,
+                                    startOffset = line.startOffset,
+                                    endOffset = line.endOffset
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    // No specific detections - highlight entire file
                     results.add(
                         LineScanResult(
-                            lineText = line.text,
+                            lineText = "File contains ${response.vulnerabilityType}",
                             vulnerabilityType = response.vulnerabilityType,
                             confidence = response.confidence,
-                            startOffset = line.startOffset,
-                            endOffset = line.endOffset
+                            startOffset = 0,
+                            endOffset = collectedData.fileText.length
                         )
                     )
-                    println("Detected: ${response.vulnerabilityType}")
                 }
             }
 
@@ -114,7 +128,6 @@ class CodeSentinelAnnotator : ExternalAnnotator<FileScanData, List<LineScanResul
         }
     }
 
-    // 🎯 තුන්වැනි පියවර: UI Thread එකේදී ඇනෝටේෂන්ස් ටික IDE එකට දානවා
     override fun apply(
         file: PsiFile,
         annotationResult: List<LineScanResult>?,
@@ -124,19 +137,20 @@ class CodeSentinelAnnotator : ExternalAnnotator<FileScanData, List<LineScanResul
         val results = annotationResult ?: cache[path] ?: return
 
         for (result in results) {
+            // Validate range
             if (result.startOffset < 0 || result.endOffset > file.textLength || result.startOffset >= result.endOffset) {
                 continue
             }
 
             val tooltip = """
             <html>
-            <b>⚠ CodeSentinel AI Detection</b>
+            <b>⚠ CodeSentinel Security Detection</b>
             <br><br>
-            <b>Type :</b> ${result.vulnerabilityType}
+            <b>Vulnerability Type :</b> ${result.vulnerabilityType}
             <br>
             <b>Confidence :</b> ${"%.2f".format(result.confidence)}%
             <br><br>
-            <b>Line :</b>
+            <b>Code :</b>
             <pre>${result.lineText.trim()}</pre>
             </html>
             """.trimIndent()
@@ -147,7 +161,15 @@ class CodeSentinelAnnotator : ExternalAnnotator<FileScanData, List<LineScanResul
             )
                 .range(TextRange(result.startOffset, result.endOffset))
                 .tooltip(tooltip)
+                .needsUpdateOnTyping(true)
                 .create()
+        }
+
+        // Force IDE to repaint the file with annotations
+        val project = file.project
+        if (!project.isDisposed) {
+            DaemonCodeAnalyzer.getInstance(project).restart(file)
+            println("[APPLY] ✓ Daemon restarted, annotations should now be visible")
         }
     }
 
