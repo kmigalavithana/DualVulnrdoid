@@ -73,8 +73,7 @@ class MyToolWindowFactory : ToolWindowFactory {
                     sourceFolder.walkTopDown()
                         .filter {
                             it.isFile &&
-                                    it.extension == "kt"
-                        }
+                                    (it.extension == "kt" || it.extension == "java")                        }
                         .forEach { file ->
 
                             val code =
@@ -92,11 +91,16 @@ class MyToolWindowFactory : ToolWindowFactory {
 
                                 vulnerabilityFound = true
 
-                                label.text =
-                                    "<html>" +
-                                            "⚠ Vulnerability Detected!<br>" +
-                                            "File: ${file.name}" +
-                                            "</html>"
+                                label.text = """
+<html>
+<b>⚠ Vulnerability Detected</b><br><br>
+File: ${file.name}<br>
+Type: ${response.vulnerabilityType}<br>
+Prediction: ${response.prediction}<br>
+Confidence: ${"%.2f".format(response.confidence)}%<br><br>
+${response.explanation}
+</html>
+""".trimIndent()
 
                                 return@addActionListener
                             }
@@ -104,8 +108,12 @@ class MyToolWindowFactory : ToolWindowFactory {
 
                     if (!vulnerabilityFound) {
 
-                        label.text =
-                            "✓ No Vulnerability Found"
+                        label.text = """
+<html>
+<b>✓ Scan Completed</b><br>
+No vulnerabilities detected.
+</html>
+""".trimIndent()
                     }
                 }
             }

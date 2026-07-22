@@ -1,9 +1,9 @@
-package com.dualvulndroid.dualvulndroid
+package com.codesentinel.plugin
 
 import com.intellij.codeInspection.LocalInspectionTool
 import com.intellij.codeInspection.ProblemsHolder
-import com.intellij.psi.PsiElementVisitor
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiElementVisitor
 import com.intellij.psi.PsiMethod
 
 class CodeSentinelInspection : LocalInspectionTool() {

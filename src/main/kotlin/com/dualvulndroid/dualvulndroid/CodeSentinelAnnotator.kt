@@ -4,147 +4,163 @@ import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.lang.annotation.AnnotationHolder
 import com.intellij.lang.annotation.ExternalAnnotator
 import com.intellij.lang.annotation.HighlightSeverity
-import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.editor.Document
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.ProjectManager
-import com.intellij.psi.PsiFile
 import com.intellij.openapi.util.TextRange
+import com.intellij.psi.PsiFile
 import java.util.concurrent.ConcurrentHashMap
 
-// පේළියේ අංකය සහ එහි ප්‍රතිඵලය තියාගන්න දත්ත ව්‍යුහය
-data class LineScanResult(
-    val lineText: String,
-    val isVulnerable: Boolean,
-    val type: String,
-    val confidence: Int,
-    val lineIndex: Int
+// 1. collectInformation එකෙන් doAnnotate එකට Data පාස් කරන්න හදන Class එක
+data class FileScanData(
+    val path: String,
+    val fileText: String,
+    val lines: List<LineData>
 )
 
-// Thread-safe map එකක්, හැම file path එකකටම අදාළ වැරදි පේළි ලැයිස්තුව තියාගන්න
-private val fileVulnerabilities = ConcurrentHashMap<String, List<LineScanResult>>()
-private val pendingFiles = ConcurrentHashMap<String, Boolean>()
+data class LineData(
+    val index: Int,
+    val text: String,
+    val startOffset: Int,
+    val endOffset: Int
+)
 
-class CodeSentinelAnnotator : ExternalAnnotator<PsiFile, List<LineScanResult>>() {
+// 2. ඩිටෙක්ට් වෙන රිසල්ට් එක
+data class LineScanResult(
+    val lineText: String,
+    val vulnerabilityType: String,
+    val confidence: Double,
+    val startOffset: Int,
+    val endOffset: Int
+)
 
-    override fun collectInformation(file: PsiFile): PsiFile? {
-        if (file.language.id == "JAVA" || file.language.id == "kotlin") {
-            return file
-        }
-        return null
+class CodeSentinelAnnotator : ExternalAnnotator<FileScanData, List<LineScanResult>>() {
+
+    companion object {
+        private val cache = ConcurrentHashMap<String, List<LineScanResult>>()
+        private val scanning = ConcurrentHashMap.newKeySet<String>()
     }
 
-    override fun doAnnotate(file: PsiFile?): List<LineScanResult>? {
-        if (file == null) return null
+    // 🎯 පළවෙනි පියවර: UI/Read Thread එකේදී ආරක්ෂිතව ෆයිල් එකේ Data ටික විතරක් එකතු කරගන්නවා
+    override fun collectInformation(file: PsiFile): FileScanData? {
+        val lang = file.language.id.lowercase()
+        if (lang != "java" && lang != "kotlin") return null
 
-        val filePath = file.virtualFile?.path ?: return null
+        val path = file.virtualFile?.path ?: return null
+        val document: Document = FileDocumentManager.getInstance().getDocument(file.virtualFile) ?: return null
         val fileText = file.text
 
-        // දැනටමත් ස්කෑන් කරලා ප්‍රතිඵල තියෙනවා නම් ඒකම රිටර්න් කරනවා
-        if (fileVulnerabilities.containsKey(filePath)) {
-            return fileVulnerabilities[filePath]
+        val linesData = mutableListOf<LineData>()
+        val lines = fileText.lines()
+
+        for ((index, line) in lines.withIndex()) {
+            val code = line.trim()
+            if (code.isBlank() || code.startsWith("//") || code.startsWith("package") || code.startsWith("import")) {
+                continue
+            }
+            if (index < document.lineCount) {
+                linesData.add(
+                    LineData(
+                        index = index,
+                        text = code,
+                        startOffset = document.getLineStartOffset(index),
+                        endOffset = document.getLineEndOffset(index)
+                    )
+                )
+            }
         }
 
-        if (pendingFiles.putIfAbsent(filePath, true) == null) {
-            ApplicationManager.getApplication().executeOnPooledThread {
-                try {
-                    val lines = fileText.split("\n")
-                    val discoveredVulns = mutableListOf<LineScanResult>()
-                    val apiClient = APIClient()
+        return FileScanData(path, fileText, linesData)
+    }
 
-                    println("⚡ CodeSentinel: Line-by-Line Scanning started for ${file.name}...")
+    // 🎯 දෙවැනි පියවර: Background Thread එකේදී Read Action බ්ලොක් නැතුව API Call එක විතරක් කරනවා
+    override fun doAnnotate(collectedData: FileScanData?): List<LineScanResult>? {
+        println("ANNOTATOR RUNNING BACKGROUND API CALLS")
+        if (collectedData == null) return null
 
-                    // 🔄 හැම කෝඩ් පේළියක්ම වෙන වෙනම අරන් Spring Boot එකට යවනවා
-                    for ((index, line) in lines.withIndex()) {
-                        val trimmedLine = line.trim()
+        val path = collectedData.path
+        if (!scanning.add(path)) return cache[path]
 
-                        // හිස් පේළි හෝ comments ස්කෑන් කරන්නේ නැහැ
-                        if (trimmedLine.isEmpty() || trimmedLine.startsWith("//") || trimmedLine.startsWith("import")) {
-                            continue
-                        }
+        val api = APIClient()
+        val results = mutableListOf<LineScanResult>()
 
-                        val response = apiClient.scanCode(trimmedLine)
-                        if (response != null && response.status == "SUCCESS" && response.vulnerable) {
+        try {
+            for (line in collectedData.lines) {
+                // CodeBERT බැක්එන්ඩ් එකට Call එකක් යනවා
+                val response = api.scanCode(line.text)
 
-                            val type = if (trimmedLine.lowercase().contains("select") || trimmedLine.lowercase().contains("where")) {
-                                "SQL Injection (CWE-89)"
-                            } else {
-                                "Improper Certificate Validation (CWE-295)"
-                            }
-
-                            discoveredVulns.add(
-                                LineScanResult(
-                                    lineText = line,
-                                    isVulnerable = true,
-                                    type = type,
-                                    confidence = response.confidence.toInt(),
-                                    lineIndex = index
-                                )
-                            )
-                            println("⚠️ Vulnerability Found on Line ${index + 1}: $trimmedLine")
-                        }
-                    }
-
-                    fileVulnerabilities[filePath] = discoveredVulns
-                    pendingFiles.remove(filePath)
-
-                    // IDE Editor එක රීෆ්‍රෙෂ් කරන්න
-                    ApplicationManager.getApplication().invokeLater {
-                        ProjectManagerHelper.restartDaemon()
-                    }
-
-
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    pendingFiles.remove(filePath)
+                if (response != null && response.vulnerable) {
+                    results.add(
+                        LineScanResult(
+                            lineText = line.text,
+                            vulnerabilityType = response.vulnerabilityType,
+                            confidence = response.confidence,
+                            startOffset = line.startOffset,
+                            endOffset = line.endOffset
+                        )
+                    )
+                    println("Detected: ${response.vulnerabilityType}")
                 }
             }
+
+            cache[path] = results
+            return results
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return cache[path]
+        } finally {
+            scanning.remove(path)
         }
-        return null
     }
 
-    override fun apply(file: PsiFile, vulns: List<LineScanResult>?, holder: AnnotationHolder) {
-        val filePath = file.virtualFile?.path ?: return
-        val actualVulns = fileVulnerabilities[filePath] ?: return
-        val document = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(file.virtualFile) ?: return
+    // 🎯 තුන්වැනි පියවර: UI Thread එකේදී ඇනෝටේෂන්ස් ටික IDE එකට දානවා
+    override fun apply(
+        file: PsiFile,
+        annotationResult: List<LineScanResult>?,
+        holder: AnnotationHolder
+    ) {
+        val path = file.virtualFile?.path ?: return
+        val results = annotationResult ?: cache[path] ?: return
 
-        // අහුවුණු හැම වැරදි පේළියක්ම IDE එක ඇතුළේ Highlight කරනවා
-        for (vuln in actualVulns) {
-            if (vuln.lineIndex < document.lineCount) {
-                val startOffset = document.getLineStartOffset(vuln.lineIndex)
-                val endOffset = document.getLineEndOffset(vuln.lineIndex)
-                val range = TextRange(startOffset, endOffset)
-
-                val tooltipMessage = """
-                    <html>
-                    <body style='font-family: sans-serif;'>
-                    <h3 style='color: #ff5555; margin-bottom: 5px;'>⚠️ [CodeSentinel] ${vuln.type} Detected</h3>
-                    <b>Confidence Score:</b> <span style='color: #ff5555;'>${vuln.confidence}%</span><br/><br/>
-                    <b>Vulnerable Line:</b> <code style='background-color: #331111;'>${vuln.lineText.trim()}</code><br/><br/>
-                    <b>Description:</b> Potential vulnerability matched with LVDAndro deep learning model patterns.<br/>
-                    </body>
-                    </html>
-                """.trimIndent()
-
-                // වැරදි තියෙන පේළිය යටින්ම රතු ඉර (ERROR Severity) ඇඳීම
-                holder.newAnnotation(HighlightSeverity.ERROR, "CodeSentinel: ${vuln.type} (${vuln.confidence}%)")
-                    .range(range)
-                    .tooltip(tooltipMessage)
-                    .create()
+        for (result in results) {
+            if (result.startOffset < 0 || result.endOffset > file.textLength || result.startOffset >= result.endOffset) {
+                continue
             }
 
+            val tooltip = """
+            <html>
+            <b>⚠ CodeSentinel AI Detection</b>
+            <br><br>
+            <b>Type :</b> ${result.vulnerabilityType}
+            <br>
+            <b>Confidence :</b> ${"%.2f".format(result.confidence)}%
+            <br><br>
+            <b>Line :</b>
+            <pre>${result.lineText.trim()}</pre>
+            </html>
+            """.trimIndent()
+
+            holder.newAnnotation(
+                HighlightSeverity.ERROR,
+                "${result.vulnerabilityType} (${"%.2f".format(result.confidence)}%)"
+            )
+                .range(TextRange(result.startOffset, result.endOffset))
+                .tooltip(tooltip)
+                .create()
         }
     }
-}
-object ProjectManagerHelper {
-    fun clearCache() {
-        // Cache එක clear කරන්න අවශ්‍ය නම් මෙතනින් කරන්න පුළුවන්
-        println("CodeSentinel Cache: Successfully Cleared via Helper!")
-    }
 
-    fun restartDaemon() {
-        // දැනට open වෙලා තියෙන හැම ප්‍රොජෙක්ට් එකකම editor එක refresh කරනවා රතු ඉරි පෙන්වන්න
-        val projects = ProjectManager.getInstance().openProjects
-        for (project in projects) {
-            DaemonCodeAnalyzer.getInstance(project).restart()
+    object ProjectManagerHelper {
+        fun clearCache() {
+            cache.clear()
+            println("✅ CodeSentinel cache cleared")
+        }
+
+        fun restartDaemon() {
+            ProjectManager.getInstance().openProjects.forEach {
+                DaemonCodeAnalyzer.getInstance(it).restart()
+            }
         }
     }
 }

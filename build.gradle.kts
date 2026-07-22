@@ -23,6 +23,9 @@ dependencies {
         intellijIdeaCommunity("2025.1")
         testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
         bundledPlugin("org.jetbrains.kotlin")
+        bundledPlugin("com.intellij.java")
+
+
 
 
 

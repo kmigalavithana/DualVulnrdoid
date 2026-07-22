@@ -43,10 +43,6 @@ class JavaSQLQuickFix(element: PsiMethod) : LocalQuickFixAndIntentionActionOnPsi
             // 2. 🚀 Commit and Clear Cache instantly
             ApplicationManager.getApplication().invokeLater {
                 PsiDocumentManager.getInstance(project).commitAllDocuments()
-
-                // Cache එක ක්ලියර් කරලා ඩීමන් එක රීස්ටාර්ට් කරනවා
-                ProjectManagerHelper.clearCache()
-                ProjectManagerHelper.restartDaemon()
             }
 
         } catch (e: Exception) {

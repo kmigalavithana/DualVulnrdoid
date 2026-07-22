@@ -41,10 +41,6 @@ class SQLQuickFix(element: KtNamedFunction) : LocalQuickFixAndIntentionActionOnP
             // 🚀 Safe විදිහට Document එක commit කරලා Helper එක හරහා Cache clear කරනවා
             ApplicationManager.getApplication().invokeLater {
                 PsiDocumentManager.getInstance(project).commitAllDocuments()
-
-                // 🛠️ FIX: CodeSentinelAnnotator වෙනුවට ProjectManagerHelper එකෙන් නිවැරදිව කෝල් කලා
-                ProjectManagerHelper.clearCache()
-                ProjectManagerHelper.restartDaemon()
             }
 
         } catch (e: Exception) {
